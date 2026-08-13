@@ -1,0 +1,7 @@
+*.pcap
+*.pcapng
+*.tls-findings.csv
+error-log.csv
+daily-reports/
+capture.log
+watch.log
