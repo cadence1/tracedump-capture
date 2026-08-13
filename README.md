@@ -20,9 +20,11 @@ TCP streams where a TLS handshake started but never completed.
 ## Prerequisites
 
 - Wireshark/tshark at `C:\Program Files\Wireshark\tshark.exe`
-- **Run as Administrator** — Npcap requires elevated privileges for live
-  capture; both `capture.ps1` and any Scheduled Task running it need to
-  run elevated
+- **Run as Administrator, as your own user account** — Npcap requires
+  elevated privileges for live capture, and its permissions don't reliably
+  extend to the `SYSTEM` account. Both `capture.ps1` and any Scheduled
+  Task running it need to run elevated under a real user, not `SYSTEM`
+  (see the Scheduled Task section below).
 - Confirm the mirror port's interface number with `tshark -D` — set in
   `capture.ps1` as `$Interface`. Interface numbering can shift if adapters
   are added/removed, so re-check if capture ever looks wrong.
@@ -49,17 +51,22 @@ slow/hung analysis pass can never interrupt the live capture:
 
 ```powershell
 $capArgs = "-NoProfile -ExecutionPolicy Bypass -File `"C:\path\to\tracedump-capture\capture.ps1`""
-schtasks /create /tn "Mirror Port Capture" /tr "powershell.exe $capArgs" /sc onstart /ru SYSTEM /rl HIGHEST /f
+schtasks /create /tn "Mirror Port Capture" /tr "powershell.exe $capArgs" /sc onstart /ru "YOURDOMAIN\yourusername" /rl HIGHEST /f
 
 $watchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"C:\path\to\tracedump-capture\watch-and-analyze.ps1`""
-schtasks /create /tn "Mirror Port Analysis" /tr "powershell.exe $watchArgs" /sc onstart /ru SYSTEM /rl HIGHEST /f
+schtasks /create /tn "Mirror Port Analysis" /tr "powershell.exe $watchArgs" /sc onstart /ru "YOURDOMAIN\yourusername" /rl HIGHEST /f
 
 schtasks /run /tn "Mirror Port Capture"
 schtasks /run /tn "Mirror Port Analysis"
 ```
 
-`/ru SYSTEM /rl HIGHEST` runs elevated without storing a user password in
-the task. Adjust the `-File` paths to match where this folder actually is.
+**Run these tasks as your own user account, not `SYSTEM`.** Npcap's
+capture permissions don't reliably extend to the `SYSTEM` account (found
+the hard way: capture worked fine from an interactive PowerShell window,
+but failed every time under a `SYSTEM`-run Scheduled Task). `schtasks`
+will prompt for that account's password when the command runs — enter it
+there, don't hardcode it anywhere. Adjust the `-File` paths to match where
+this folder actually is.
 
 ## Configuration
 

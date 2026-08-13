@@ -20,6 +20,7 @@ $OutDir      = "C:\tracedump"
 $FilePrefix  = "mirror"
 $RotateSecs  = 3600                     # 1 hour
 $LogFile     = Join-Path $OutDir "capture.log"
+$TsharkStdErr = Join-Path $OutDir "tshark-stderr.log"   # tshark's own stderr (rolling, see below)
 # ------------------------------------------------------------------------
 
 if (-not (Test-Path $TsharkExe)) {
@@ -48,17 +49,28 @@ while ($true) {
     Write-Log "Launching: tshark $($args -join ' ')"
     $exitCode = $null
     try {
-        # Redirect tshark's stdout+stderr directly to the log file with
-        # native redirection (*>>), NOT `2>&1 | ForEach-Object`. tshark
-        # writes routine status messages (e.g. "Capturing on 'X'") to
-        # stderr - piping stderr through `2>&1` turns each line into a
-        # PowerShell ErrorRecord, and with $ErrorActionPreference="Stop"
-        # that silently converts a harmless startup message into a
-        # terminating error, killing and restarting tshark every few
-        # seconds without ever actually capturing anything. Direct file
-        # redirection bypasses PowerShell's error-object wrapping entirely.
-        & $TsharkExe @args *>> $LogFile
-        $exitCode = $LASTEXITCODE
+        # Start-Process + true OS-level redirection, NOT the `&` call
+        # operator. PowerShell's `&` wraps a native command's stderr in
+        # its own error-record machinery: with $ErrorActionPreference =
+        # "Stop", ANY text tshark writes to stderr (even routine startup
+        # chatter like "Capturing on 'X'") can get turned into a
+        # terminating exception - and this isn't specific to `2>&1`;
+        # *>> file redirection goes through the same PowerShell-level
+        # stream handling and doesn't avoid it either (learned the hard
+        # way - see git history). Start-Process's -RedirectStandardError
+        # is a real OS-level redirect that never touches PowerShell's
+        # stream machinery, so tshark's normal output can never
+        # masquerade as a script-terminating error. Verified directly
+        # against this exact failure shape (stderr write + non-zero
+        # exit, under $ErrorActionPreference=Stop and
+        # $PSNativeCommandUseErrorActionPreference=$true) before shipping.
+        $proc = Start-Process -FilePath $TsharkExe -ArgumentList $args -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput (Join-Path $OutDir "tshark-stdout.log") `
+            -RedirectStandardError $TsharkStdErr
+        $exitCode = $proc.ExitCode
+        if (Test-Path $TsharkStdErr) {
+            Get-Content $TsharkStdErr -ErrorAction SilentlyContinue | ForEach-Object { Add-Content -Path $LogFile -Value "  tshark: $_" }
+        }
     } catch {
         Write-Log "tshark launch failed: $_"
     }
