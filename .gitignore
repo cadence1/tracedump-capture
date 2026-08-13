@@ -5,3 +5,4 @@ error-log.csv
 daily-reports/
 capture.log
 watch.log
+upload-config.ps1

@@ -73,6 +73,24 @@ Edit the `# ---- config ----` block near the top of each script:
 | `watch-and-analyze.ps1` | `$PollSeconds` | `300` | how often to check for finished files |
 | `watch-and-analyze.ps1` | `$RetentionDays` | `7` | auto-delete **clean** pcaps + reports older than this; `0` = keep forever |
 | `watch-and-analyze.ps1` | `$ErrorRetentionDays` | `0` (forever) | auto-delete pcaps **with findings** older than this |
+| `watch-and-analyze.ps1` | `$UploadToCloudShark` | `$false` | upload pcaps **with findings** to a CloudShark-compatible receiver (see below) |
+
+## Uploading findings to CloudShark
+
+Pcaps with findings can optionally be pushed to a
+[CloudShark-compatible receiver](https://github.com/cadence1/Meraki-Cloudshark-Receiver)
+for remote viewing — the same upload API that project implements. Clean
+hours are never uploaded, regardless of this setting.
+
+1. `cp upload-config.example.ps1 upload-config.ps1` and fill in
+   `$CloudSharkUrl` and `$CloudSharkToken` (the receiver's
+   `CLOUDSHARK_RECEIVER_TOKEN`). **`upload-config.ps1` is gitignored** —
+   don't commit real credentials to this (public) repo.
+2. Set `$UploadToCloudShark = $true` in `watch-and-analyze.ps1`.
+
+Verified against a live receiver before being documented here — a
+real broken-handshake pcap round-tripped through analysis, upload, and
+confirmed present on the receiver with a matching filename and byte size.
 
 ## Output
 

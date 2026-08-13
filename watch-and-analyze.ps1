@@ -28,7 +28,18 @@ $AnalyzeScript      = Join-Path $PSScriptRoot "analyze-tls.ps1"
 $LogFile            = Join-Path $OutDir "watch.log"
 $ErrorLogPath       = Join-Path $OutDir "error-log.csv"
 $DailyReportDir     = Join-Path $OutDir "daily-reports"
+
+# Upload pcaps WITH findings to the CloudShark-compatible receiver
+# (github.com/cadence1/Meraki-Cloudshark-Receiver). Off by default. Real
+# URL/token live in upload-config.ps1 (gitignored, not this file) - copy
+# upload-config.example.ps1 to set it up. Clean hours are never uploaded.
+$UploadToCloudShark = $false
 # ------------------------------------------------------------------------
+
+$CloudSharkUrl = $null
+$CloudSharkToken = $null
+$UploadConfigPath = Join-Path $PSScriptRoot "upload-config.ps1"
+if (Test-Path $UploadConfigPath) { . $UploadConfigPath }
 
 function Write-Log($msg) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
@@ -63,6 +74,21 @@ function Add-ToErrorLog([string]$findingsPath, [string]$sourceFileName) {
         $rows | Export-Csv -Path $ErrorLogPath -NoTypeInformation
     }
     Write-Log "Appended $($rows.Count) finding(s) from $sourceFileName to error-log.csv"
+}
+
+function Send-ToCloudShark([string]$pcapPath, [string]$fileName) {
+    if (-not $UploadToCloudShark) { return }
+    if ([string]::IsNullOrEmpty($CloudSharkUrl) -or [string]::IsNullOrEmpty($CloudSharkToken)) {
+        Write-Log "UploadToCloudShark is true but not configured - copy upload-config.example.ps1 to upload-config.ps1 and fill it in"
+        return
+    }
+    $uri = "$CloudSharkUrl/api/v1/$CloudSharkToken/upload?filename=$([Uri]::EscapeDataString($fileName))"
+    try {
+        $resp = Invoke-RestMethod -Uri $uri -Method Put -InFile $pcapPath -ContentType "application/octet-stream"
+        Write-Log "Uploaded $fileName to CloudShark receiver -> id=$($resp.id)"
+    } catch {
+        Write-Log "CloudShark upload failed for $fileName : $_"
+    }
 }
 
 function Update-DailyReport {
@@ -135,7 +161,10 @@ while ($true) {
                     Write-Log "Analyzing $($f.Name)..."
                     try {
                         & $AnalyzeScript -PcapPath $f.FullName 2>&1 | ForEach-Object { Add-Content -Path $LogFile -Value $_ }
-                        Add-ToErrorLog -findingsPath $findingsPath -sourceFileName $f.Name
+                        if (Test-HasFindings $findingsPath) {
+                            Add-ToErrorLog -findingsPath $findingsPath -sourceFileName $f.Name
+                            Send-ToCloudShark -pcapPath $f.FullName -fileName $f.Name
+                        }
                     } catch {
                         Write-Log "Analysis failed for $($f.Name): $_"
                     }
