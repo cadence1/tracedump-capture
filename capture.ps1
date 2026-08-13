@@ -46,11 +46,22 @@ while ($true) {
         "-w", $outFile
     )
     Write-Log "Launching: tshark $($args -join ' ')"
+    $exitCode = $null
     try {
-        & $TsharkExe @args 2>&1 | ForEach-Object { Add-Content -Path $LogFile -Value $_ }
-        Write-Log "tshark exited normally (unexpected during continuous capture) - restarting in 5s"
+        # Redirect tshark's stdout+stderr directly to the log file with
+        # native redirection (*>>), NOT `2>&1 | ForEach-Object`. tshark
+        # writes routine status messages (e.g. "Capturing on 'X'") to
+        # stderr - piping stderr through `2>&1` turns each line into a
+        # PowerShell ErrorRecord, and with $ErrorActionPreference="Stop"
+        # that silently converts a harmless startup message into a
+        # terminating error, killing and restarting tshark every few
+        # seconds without ever actually capturing anything. Direct file
+        # redirection bypasses PowerShell's error-object wrapping entirely.
+        & $TsharkExe @args *>> $LogFile
+        $exitCode = $LASTEXITCODE
     } catch {
-        Write-Log "tshark failed: $_ - restarting in 5s"
+        Write-Log "tshark launch failed: $_"
     }
+    Write-Log "tshark exited (code $exitCode) - restarting in 5s"
     Start-Sleep -Seconds 5
 }
