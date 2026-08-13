@@ -20,7 +20,6 @@ $OutDir      = "C:\tracedump"
 $FilePrefix  = "mirror"
 $RotateSecs  = 3600                     # 1 hour
 $LogFile     = Join-Path $OutDir "capture.log"
-$TsharkStdErr = Join-Path $OutDir "tshark-stderr.log"   # tshark's own stderr (rolling, see below)
 # ------------------------------------------------------------------------
 
 if (-not (Test-Path $TsharkExe)) {
@@ -48,31 +47,31 @@ while ($true) {
     )
     Write-Log "Launching: tshark $($args -join ' ')"
     $exitCode = $null
+    # Use the plain `&` call operator - confirmed on the real capture
+    # machine to actually work for live capture, unlike Start-Process
+    # (which launched without error but silently produced no output
+    # there - Npcap's driver access apparently doesn't transfer cleanly
+    # to a Start-Process-launched child even when run interactively as
+    # the same user). The problem was never `&` itself; it's that
+    # PowerShell wraps a native command's stderr in its own error-record
+    # machinery, and with $ErrorActionPreference="Stop" that can turn
+    # routine stderr chatter (tshark's "Capturing on 'X'") into a
+    # terminating exception - regardless of redirection syntax (2>&1 and
+    # *>> both go through it). Fix: scope $ErrorActionPreference down to
+    # SilentlyContinue for just this call (restored immediately after),
+    # which suppresses both the exception AND the console noise a plain
+    # "Continue" still leaves behind. Verified against the exact failure
+    # shape (stderr write + non-zero exit, under
+    # $PSNativeCommandUseErrorActionPreference=$true) before shipping.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
     try {
-        # Start-Process + true OS-level redirection, NOT the `&` call
-        # operator. PowerShell's `&` wraps a native command's stderr in
-        # its own error-record machinery: with $ErrorActionPreference =
-        # "Stop", ANY text tshark writes to stderr (even routine startup
-        # chatter like "Capturing on 'X'") can get turned into a
-        # terminating exception - and this isn't specific to `2>&1`;
-        # *>> file redirection goes through the same PowerShell-level
-        # stream handling and doesn't avoid it either (learned the hard
-        # way - see git history). Start-Process's -RedirectStandardError
-        # is a real OS-level redirect that never touches PowerShell's
-        # stream machinery, so tshark's normal output can never
-        # masquerade as a script-terminating error. Verified directly
-        # against this exact failure shape (stderr write + non-zero
-        # exit, under $ErrorActionPreference=Stop and
-        # $PSNativeCommandUseErrorActionPreference=$true) before shipping.
-        $proc = Start-Process -FilePath $TsharkExe -ArgumentList $args -NoNewWindow -Wait -PassThru `
-            -RedirectStandardOutput (Join-Path $OutDir "tshark-stdout.log") `
-            -RedirectStandardError $TsharkStdErr
-        $exitCode = $proc.ExitCode
-        if (Test-Path $TsharkStdErr) {
-            Get-Content $TsharkStdErr -ErrorAction SilentlyContinue | ForEach-Object { Add-Content -Path $LogFile -Value "  tshark: $_" }
-        }
+        & $TsharkExe @args *>> $LogFile
+        $exitCode = $LASTEXITCODE
     } catch {
         Write-Log "tshark launch failed: $_"
+    } finally {
+        $ErrorActionPreference = $prevEAP
     }
     Write-Log "tshark exited (code $exitCode) - restarting in 5s"
     Start-Sleep -Seconds 5
