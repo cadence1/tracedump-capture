@@ -50,6 +50,12 @@ $fields = @(
 $tsharkArgs = @("-r", $PcapPath, "-Y", $filter, "-T", "fields")
 foreach ($f in $fields) { $tsharkArgs += @("-e", $f) }
 $tsharkArgs += @("-E", "separator=/t", "-E", "quote=n", "-E", "header=n", "-E", "occurrence=a")
+# We don't care about JSON payloads at all here (TLS fields only), and the
+# JSON dissector has a known bug where a sufficiently large/nested JSON body
+# in captured traffic trips an internal safety limit ("Dissector bug ...
+# possible infinite loop") and aborts the whole tshark run. Disabling it
+# sidesteps the bug entirely rather than trying to tune its limits.
+$tsharkArgs += @("--disable-protocol", "json")
 
 function Test-ContainsValue([string]$field, [string]$value) {
     if ([string]::IsNullOrEmpty($field)) { return $false }
@@ -57,48 +63,72 @@ function Test-ContainsValue([string]$field, [string]$value) {
 }
 
 $streams = @{}
+$stderrCapture = [System.IO.Path]::GetTempFileName()
+$tsharkExitCode = 0
 
-& $TsharkExe @tsharkArgs | ForEach-Object {
-    $parts = $_ -split "`t"
-    if ($parts.Count -lt 14) { return }
-    $time = $parts[0]; $streamId = $parts[1]
-    $srcIp = if ($parts[2]) { $parts[2] } else { $parts[4] }   # ip.src, else ipv6.src
-    $dstIp = if ($parts[3]) { $parts[3] } else { $parts[5] }   # ip.dst, else ipv6.dst
-    $srcPort = $parts[6]; $dstPort = $parts[7]; $hsType = $parts[8]
-    $alertLevel = $parts[9]; $alertDesc = $parts[10]; $contentType = $parts[11]
-    $reset = $parts[12]; $sni = $parts[13]
+# Scope $ErrorActionPreference down to SilentlyContinue for just this call.
+# tshark routinely writes warnings to stderr (e.g. "file appears to have
+# been cut short") for real problems we want to know about, but under
+# $ErrorActionPreference="Stop" any stderr write - or non-zero exit code,
+# depending on PowerShell version/settings - can get converted into an
+# uncaught terminating exception instead of something we can inspect and
+# report on. That previously meant a single bad pcap (truncated file, a
+# dissector bug, etc.) killed this script before it ever wrote a findings
+# report, which left watch-and-analyze.ps1 retrying the same file forever
+# since it only stops retrying once a report file exists. Redirecting
+# stderr to its own file (separate from the stdout pipe used for parsing)
+# plus the scoped EAP override means a tshark failure now becomes data we
+# report on, not an exception that skips reporting entirely.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "SilentlyContinue"
+try {
+    & $TsharkExe @tsharkArgs 2> $stderrCapture | ForEach-Object {
+        $parts = $_ -split "`t"
+        if ($parts.Count -lt 14) { return }
+        $time = $parts[0]; $streamId = $parts[1]
+        $srcIp = if ($parts[2]) { $parts[2] } else { $parts[4] }   # ip.src, else ipv6.src
+        $dstIp = if ($parts[3]) { $parts[3] } else { $parts[5] }   # ip.dst, else ipv6.dst
+        $srcPort = $parts[6]; $dstPort = $parts[7]; $hsType = $parts[8]
+        $alertLevel = $parts[9]; $alertDesc = $parts[10]; $contentType = $parts[11]
+        $reset = $parts[12]; $sni = $parts[13]
 
-    if ([string]::IsNullOrEmpty($streamId)) { return }
+        if ([string]::IsNullOrEmpty($streamId)) { return }
 
-    if (-not $streams.ContainsKey($streamId)) {
-        $streams[$streamId] = [PSCustomObject]@{
-            Stream         = $streamId
-            SrcIP          = $srcIp; SrcPort = $srcPort
-            DstIP          = $dstIp; DstPort = $dstPort
-            SNI            = ""
-            FirstSeen      = $time
-            LastSeen       = $time
-            HasClientHello = $false
-            HasServerHello = $false
-            HasAppData     = $false
-            HasReset       = $false
-            Alerts         = New-Object System.Collections.Generic.List[string]
+        if (-not $streams.ContainsKey($streamId)) {
+            $streams[$streamId] = [PSCustomObject]@{
+                Stream         = $streamId
+                SrcIP          = $srcIp; SrcPort = $srcPort
+                DstIP          = $dstIp; DstPort = $dstPort
+                SNI            = ""
+                FirstSeen      = $time
+                LastSeen       = $time
+                HasClientHello = $false
+                HasServerHello = $false
+                HasAppData     = $false
+                HasReset       = $false
+                Alerts         = New-Object System.Collections.Generic.List[string]
+            }
+        }
+        $s = $streams[$streamId]
+        $s.LastSeen = $time
+
+        if (Test-ContainsValue $hsType "1") { $s.HasClientHello = $true; if ($sni) { $s.SNI = $sni } }
+        if (Test-ContainsValue $hsType "2") { $s.HasServerHello = $true }
+        if (Test-ContainsValue $contentType "23") { $s.HasAppData = $true }
+        if ($reset -eq "1") { $s.HasReset = $true }
+        if (-not [string]::IsNullOrEmpty($alertDesc)) {
+            # alert desc 0 = close_notify, a normal/benign teardown - don't flag on its own
+            if ($alertDesc -ne "0") {
+                $s.Alerts.Add("level=$alertLevel desc=$alertDesc")
+            }
         }
     }
-    $s = $streams[$streamId]
-    $s.LastSeen = $time
-
-    if (Test-ContainsValue $hsType "1") { $s.HasClientHello = $true; if ($sni) { $s.SNI = $sni } }
-    if (Test-ContainsValue $hsType "2") { $s.HasServerHello = $true }
-    if (Test-ContainsValue $contentType "23") { $s.HasAppData = $true }
-    if ($reset -eq "1") { $s.HasReset = $true }
-    if (-not [string]::IsNullOrEmpty($alertDesc)) {
-        # alert desc 0 = close_notify, a normal/benign teardown - don't flag on its own
-        if ($alertDesc -ne "0") {
-            $s.Alerts.Add("level=$alertLevel desc=$alertDesc")
-        }
-    }
+    $tsharkExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevEAP
 }
+$tsharkStderr = if (Test-Path $stderrCapture) { (Get-Content $stderrCapture -Raw -ErrorAction SilentlyContinue) } else { "" }
+Remove-Item $stderrCapture -ErrorAction SilentlyContinue
 
 function Format-HostPort([string]$ip, [string]$port) {
     if ($ip -match ":") { return "[$ip]:$port" }  # IPv6 needs brackets when paired with a port
@@ -131,6 +161,26 @@ foreach ($s in $streams.Values) {
             Alerts    = ($s.Alerts -join "; ")
         }
     }
+}
+
+# tshark itself failed (non-zero exit - e.g. a truncated/corrupt pcap, or a
+# dissector bug it hit) rather than just finding zero TLS problems. Flag
+# this explicitly instead of silently writing an empty/misleading "all
+# clear" report - whatever streams WERE parsed before the failure (if any)
+# are still included above; this is additive, not a replacement.
+if ($tsharkExitCode -ne 0) {
+    $results += [PSCustomObject]@{
+        Stream    = ""
+        Status    = "Analysis Error"
+        Client    = ""
+        Server    = ""
+        SNI       = ""
+        FirstSeen = ""
+        LastSeen  = ""
+        Reset     = ""
+        Alerts    = "tshark exited with code ${tsharkExitCode}: $($tsharkStderr.Trim() -replace '\s+', ' ')"
+    }
+    Write-Host "WARNING: tshark exited with code $tsharkExitCode reading this file - see Analysis Error row in the report"
 }
 
 $reportPath = [System.IO.Path]::ChangeExtension($PcapPath, $null).TrimEnd(".") + ".tls-findings.csv"
