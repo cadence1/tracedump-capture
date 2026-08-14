@@ -86,8 +86,14 @@ try {
         $parts = $_ -split "`t"
         if ($parts.Count -lt 14) { return }
         $time = $parts[0]; $streamId = $parts[1]
-        $srcIp = if ($parts[2]) { $parts[2] } else { $parts[4] }   # ip.src, else ipv6.src
-        $dstIp = if ($parts[3]) { $parts[3] } else { $parts[5] }   # ip.dst, else ipv6.dst
+        # ERSPAN/GRE-encapsulated captures have TWO ip layers per packet -
+        # the outer tunnel endpoints and the inner original packet. With
+        # -E occurrence=a, a field that appears twice comes back comma-
+        # joined in outer-to-inner tree order, so the LAST value is the
+        # real (innermost) address; a plain, non-encapsulated capture just
+        # has one value and this is a no-op.
+        $srcIp = if ($parts[2]) { ($parts[2] -split ",")[-1] } else { ($parts[4] -split ",")[-1] }   # ip.src, else ipv6.src
+        $dstIp = if ($parts[3]) { ($parts[3] -split ",")[-1] } else { ($parts[5] -split ",")[-1] }   # ip.dst, else ipv6.dst
         $srcPort = $parts[6]; $dstPort = $parts[7]; $hsType = $parts[8]
         $alertLevel = $parts[9]; $alertDesc = $parts[10]; $contentType = $parts[11]
         $reset = $parts[12]; $sni = $parts[13]
