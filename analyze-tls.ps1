@@ -133,7 +133,15 @@ try {
 } finally {
     $ErrorActionPreference = $prevEAP
 }
-$tsharkStderr = if (Test-Path $stderrCapture) { (Get-Content $stderrCapture -Raw -ErrorAction SilentlyContinue) } else { "" }
+$tsharkStderr = ""
+if (Test-Path $stderrCapture) {
+    # Get-Content -Raw returns $null (not "") for a zero-byte file - which
+    # happens when tshark exits non-zero without ever writing to stderr
+    # (e.g. an abrupt kill/crash). Guard against that explicitly rather
+    # than calling .Trim() on a possible $null further down.
+    $capturedContent = Get-Content $stderrCapture -Raw -ErrorAction SilentlyContinue
+    if ($null -ne $capturedContent) { $tsharkStderr = $capturedContent }
+}
 Remove-Item $stderrCapture -ErrorAction SilentlyContinue
 
 function Format-HostPort([string]$ip, [string]$port) {
