@@ -6,3 +6,4 @@ daily-reports/
 capture.log
 watch.log
 upload-config.ps1
+ci-failures*.csv

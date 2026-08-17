@@ -16,6 +16,12 @@ TCP streams where a TLS handshake started but never completed.
   have finished rotating, runs `analyze-tls.ps1` on any that don't have a
   report yet, maintains a daily aggregate report and a persistent error
   log, and prunes old files.
+- **`correlate-failures.ps1`** — cross-references a list of externally
+  reported failures (e.g. "CI hit a TLS timeout against registry-1.docker.io
+  at 09:03") against `error-log.csv`, to check whether the capture
+  independently saw a handshake problem for that host around that time.
+  Takes a CSV (`Timestamp,Host,Description`) - see `.\correlate-failures.ps1
+  -?` for the exact format and matching window.
 
 ## Prerequisites
 
